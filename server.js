@@ -1,167 +1,126 @@
-const express = require("express");
+// server.js — backend Express untuk aplikasi menu
+// Jalankan: npm i express cors  →  node server.js
+// Pastikan package.json punya  "type": "module"
+import express from "express";
+import cors from "cors";
+import {
+  categories,
+  allMenus,
+  featuredMenu,
+  favoriteMenus,
+  getDefaultChoices,
+  getUnitPrice,
+  getOptionLabels,
+} from "./data/menus.js"; // sesuaikan path file data kamu
 
 const app = express();
-app.use(express.json());
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-// Endpoint beranda
-app.get("/", (req, res) => {
-  res.send("Backend Cafe berhasil berjalan!");
+app.use(cors());
+app.use(express.json());
+
+// Penyimpanan sementara (hilang saat server restart). Ganti dengan database nanti.
+const orders = [];
+
+// ===== MENU =====
+app.get("/api/categories", (_req, res) => res.json(categories));
+
+app.get("/api/menus", (req, res) => {
+  const { category, q } = req.query;
+  let result = allMenus;
+  if (category && category !== "Semua") {
+    result = result.filter((m) => m.category === category);
+  }
+  if (q) {
+    const kw = String(q).toLowerCase();
+    result = result.filter(
+      (m) =>
+        m.name.toLowerCase().includes(kw) ||
+        m.description.toLowerCase().includes(kw)
+    );
+  }
+  res.json(result);
 });
 
-// Data menu sementara
-const menus = [
-  {
-    id: 1,
-    name: "Es Kopi Susu",
-    price: 18000,
-    available: true,
-  },
-  {
-    id: 2,
-    name: "Americano",
-    price: 15000,
-    available: true,
-  },
-  {
-    id: 3,
-    name: "Croissant",
-    price: 22000,
-    available: false,
-  },
-  {
-    id: 4,
-    name: "Croissant",
-    price: 20000,
-    available: true,
-  },
-];
+// Route statis harus sebelum "/:id"
+app.get("/api/menus/featured", (_req, res) => res.json(featuredMenu));
+app.get("/api/menus/favorites", (_req, res) => res.json(favoriteMenus));
 
-// Mengambil satu menu berdasarkan ID
 app.get("/api/menus/:id", (req, res) => {
-  const id = Number(req.params.id);
-
-  const menu = menus.find((item) => item.id === id);
-  if (!menu) {
-    return res.status(404).json({
-      message: "Menu tidak ditemukan",
-    });
-  }
-
+  const menu = allMenus.find((m) => m.id === Number(req.params.id));
+  if (!menu) return res.status(404).json({ error: "Menu tidak ditemukan" });
   res.json(menu);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server berjalan di http://localhost:${PORT}`);
-});
+// ===== PESANAN =====
+// Body: { customerName, note, items: [{ menuId, qty, choices: { pedas: "ekstra", ... } }] }
+app.post("/api/orders", (req, res) => {
+  const { customerName, note = "", items } = req.body || {};
 
-// Menambahkan fitur pencarian menu berdasarkan nama
-app.get("/api/menus", (req, res) => {
-  const { search } = req.query;
-
-  if (search) {
-    const filteredMenus = menus.filter((item) =>
-      item.name.toLowerCase().includes(search.toLowerCase()),
-    );
-
-    return res.json(filteredMenus);
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "Item pesanan kosong" });
   }
 
-  res.json(menus);
-});
+  const lines = [];
+  for (const it of items) {
+    const menu = allMenus.find((m) => m.id === Number(it.menuId));
+    const qty = Number(it.qty);
+    if (!menu) {
+      return res.status(400).json({ error: `Menu ${it.menuId} tidak ada` });
+    }
+    if (!Number.isInteger(qty) || qty < 1 || qty > 50) {
+      return res.status(400).json({ error: `Jumlah tidak valid untuk ${menu.name}` });
+    }
 
-// Menambahkan fitur untuk menambahkan menu baru
+    // Gabungkan default dengan pilihan user, buang opsi yang tidak valid
+    const choices = getDefaultChoices(menu);
+    for (const g of menu.detail?.optionGroups || []) {
+      const picked = it.choices?.[g.id];
+      if (picked && g.options.some((o) => o.id === picked)) {
+        choices[g.id] = picked;
+      }
+    }
 
-app.post("/api/menus", (req, res) => {
-  const { name, price, available } = req.body ?? {};
-
-  // Validasi nama
-  if (typeof name !== "string" || name.trim() === "") {
-    return res.status(400).json({
-      message: "Nama menu wajib diisi",
+    // Harga SELALU dihitung di server, jangan percaya harga dari client
+    const unitPrice = getUnitPrice(menu, choices);
+    lines.push({
+      menuId: menu.id,
+      name: menu.name,
+      qty,
+      choices,
+      optionLabels: getOptionLabels(menu, choices),
+      unitPrice,
+      subtotal: unitPrice * qty,
     });
   }
 
-  // Validasi harga
-  if (typeof price !== "number" || price <= 0) {
-    return res.status(400).json({
-      message: "Harga harus berupa angka lebih dari 0",
-    });
-  }
-
-  // Validasi ketersediaan
-  if (typeof available !== "boolean") {
-    return res.status(400).json({
-      message: "Available harus berupa true atau false",
-    });
-  }
-
-  // Membuat menu baru jika semua validasi lolos
-  const newMenu = {
-    id: menus.length + 1,
-    name: name.trim(),
-    price,
-    available,
+  const order = {
+    id: `ORD-${Date.now().toString(36).toUpperCase()}`,
+    customerName: String(customerName || "").trim() || "Tamu",
+    note: String(note).slice(0, 200),
+    items: lines,
+    total: lines.reduce((sum, l) => sum + l.subtotal, 0),
+    status: "diterima",
+    createdAt: new Date().toISOString(),
   };
 
-  menus.push(newMenu);
-
-  res.status(201).json({
-    message: "Menu berhasil ditambahkan",
-    data: newMenu,
-  });
+  orders.push(order);
+  res.status(201).json(order);
 });
 
-// Menambahkan fitur untuk mengubah harga menu berdasarkan ID
-app.patch("/api/menus/:id", (req, res) => {
-  const id = Number(req.params.id);
+app.get("/api/orders", (_req, res) => res.json(orders));
 
-  // Cari menu berdasarkan ID
-  const menu = menus.find((item) => item.id === id);
-
-  if (!menu) {
-    return res.status(404).json({
-      message: "Menu tidak ditemukan",
-    });
-  }
-
-  const { price } = req.body ?? {};
-
-  // Validasi harga
-  if (typeof price !== "number" || price <= 0) {
-    return res.status(400).json({
-      message: "Harga harus berupa angka lebih dari 0",
-    });
-  }
-
-  // Ubah harga menu
-  menu.price = price;
-
-  res.json({
-    message: "Harga menu berhasil diperbarui",
-    data: menu,
-  });
+app.get("/api/orders/:id", (req, res) => {
+  const order = orders.find((o) => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: "Pesanan tidak ditemukan" });
+  res.json(order);
 });
 
-// Menambahkan fitur untuk menghapus menu berdasarkan ID
-app.delete("/api/menus/:id", (req, res) => {
-  const id = Number(req.params.id);
-
-  // Cari posisi menu di dalam array
-  const index = menus.findIndex((item) => item.id === id);
-
-  // Jika menu tidak ditemukan
-  if (index === -1) {
-    return res.status(404).json({
-      message: "Menu tidak ditemukan",
-    });
-  }
-
-  // Hapus menu dari array
-  const deletedMenu = menus.splice(index, 1);
-
-  res.json({
-    message: "Menu berhasil dihapus",
-    data: deletedMenu[0],
-  });
+// ===== 404 & error handler =====
+app.use((_req, res) => res.status(404).json({ error: "Endpoint tidak ditemukan" }));
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(500).json({ error: "Terjadi kesalahan server" });
 });
+
+app.listen(PORT, () => console.log(`Server jalan di http://localhost:${PORT}`));
